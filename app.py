@@ -482,7 +482,6 @@ def render_order_query_page():
             st.info(f"총액 수동입력 적용: {(o.total_override or 0):,}원 (표시 총액은 이 값으로 대체됩니다)")
         if getattr(o, "memo", ""):
             st.write(f"📝 메모: {o.memo}")
-            )
             st.write(f"• 제작처: {o.vendor or '—'}")
             st.write(f"• 계산서 발행: {'✅ 발행됨' if getattr(o, 'invoice_issued', 0) else '❌ 미발행'}")
 
