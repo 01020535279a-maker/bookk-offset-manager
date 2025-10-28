@@ -6,7 +6,7 @@ import streamlit as st
 import pandas as pd
 
 # 🔐 접근 제한 (세션 유지 + 시크릿 지원)
-APP_PASSWORD = st.secrets.get("APP_PASSWORD", "bookk2025")
+APP_PASSWORD = st.secrets.get("APP_PASSWORD", "qnzmzm1101!")
 
 if "authenticated" not in st.session_state:
     st.session_state.authenticated = False
