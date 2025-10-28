@@ -1,0 +1,21 @@
+# Python / venv
+__pycache__/
+*.py[cod]
+*.pyc
+.venv/
+venv/
+env/
+
+# Streamlit
+.streamlit/secrets.toml
+
+# Local data & exports
+data/*.db
+data/backups/
+exports/
+config/*.xlsx
+
+# OS / Editor
+.DS_Store
+Thumbs.db
+.vscode/
