@@ -5,9 +5,40 @@ from datetime import date
 import streamlit as st
 import pandas as pd
 
+# 🔒 비밀번호 입력 구간 (여기 넣기!)
+# 🔐 접근 제한 (세션 유지 + 시크릿 지원)
+APP_PASSWORD = st.secrets.get("APP_PASSWORD", "bookk2025")
+
+if "authenticated" not in st.session_state:
+    st.session_state.authenticated = False
+
+def login_form():
+    st.title("🔒 접근 제한")
+    pw = st.text_input("비밀번호를 입력하세요", type="password")
+    if st.button("접속"):
+        if pw == APP_PASSWORD:
+            st.session_state.authenticated = True
+            st.success("✅ 인증되었습니다.")
+            st.rerun()
+        else:
+            st.error("❌ 비밀번호가 올바르지 않습니다.")
+
+# 비로그인 상태면 아래 코드 실행 중단
+if not st.session_state.authenticated:
+    login_form()
+    st.stop()
+
+# (선택) 로그아웃 버튼
+with st.sidebar:
+    if st.button("로그아웃"):
+        st.session_state.authenticated = False
+        st.rerun()
+
+
 from sqlalchemy import create_engine, Column, Integer, String, Text
 from sqlalchemy.orm import declarative_base, sessionmaker
 from sqlalchemy import text
+
 
 # ---------------------------
 # 페이지 설정
@@ -22,7 +53,10 @@ st.set_page_config(
 # DB 연결/모델
 # ---------------------------
 os.makedirs("data", exist_ok=True)
-engine = create_engine("sqlite:///data/app.db", echo=False)
+import streamlit as st
+from sqlalchemy import create_engine
+
+engine = create_engine(st.secrets["DB_URL"], echo=False)
 Base = declarative_base()
 SessionLocal = sessionmaker(bind=engine)
 
@@ -52,6 +86,8 @@ class Order(Base):
     vendor = Column(String)                # 제작처
     unit_price = Column(Integer)           # 권당 가격(부가세 제외)
     invoice_issued = Column(Integer)       # 0/1
+    total_override = Column(Integer)  # ✅ 총액 수동 입력(없으면 NULL/0)
+    memo = Column(Text)               # ✅ 메모
 
     # 합계(공급가/부가세/총액)
     supply_price = Column(Integer)  # VAT 제외
@@ -90,6 +126,20 @@ class Order(Base):
     delivery_unit = Column(Integer); delivery_cost = Column(Integer)
 
 Base.metadata.create_all(bind=engine)
+
+# ✅ 여기에 아래 코드 한 번에 붙여넣기
+from sqlalchemy import text
+
+def _ensure_orders_override_and_memo():
+    with engine.connect() as conn:
+        cols = [r[1] for r in conn.execute(text("PRAGMA table_info(orders)")).fetchall()]
+        if "total_override" not in cols:
+            conn.execute(text("ALTER TABLE orders ADD COLUMN total_override INTEGER"))
+        if "memo" not in cols:
+            conn.execute(text("ALTER TABLE orders ADD COLUMN memo TEXT"))
+        conn.commit()
+
+_ensure_orders_override_and_memo()
 
 # --- one-off migrations: 컬럼 없으면 추가 ---
 def _pragma_cols(conn):
@@ -146,6 +196,23 @@ def calc_supply_and_vat(data_dict: dict):
     vat = int(round(supply * 0.10))
     total = supply + vat
     return supply, vat, total
+def get_effective_total(order: Order) -> int:
+    """표시용 총액: 수동입력 값이 있으면 그 값을 우선."""
+    ov = getattr(order, "total_override", 0) or 0
+    return int(ov) if ov > 0 else int(order.total_price or 0)
+
+def set_order_override_and_memo(order_id: int, override_value: int | None, memo_text: str | None):
+    s = get_session()
+    try:
+        o = s.query(Order).filter(Order.id == order_id).first()
+        if o:
+            # 0 또는 빈 값이면 수동입력 해제
+            o.total_override = int(override_value) if (override_value not in [None, "", 0]) else None
+            o.memo = (memo_text or "").strip()
+            s.commit()
+    finally:
+        s.close()
+
 
 # ---------------------------
 # Book CRUD
@@ -330,11 +397,14 @@ def render_order_query_page():
         "발주일": o.date,
         "제작처": o.vendor or "",
         "부수": o.qty,
-        "권당 가격": o.unit_price or 0,
+        "권당 가격": getattr(o, "unit_price", None) or "",  # 있으면 표시, 없으면 공란
         "공급가(VAT 제외)": o.supply_price,
         "부가세": o.vat_price,
-        "총액(VAT 포함)": o.total_price,
-        "계산서 발행": bool(getattr(o, "invoice_issued", 0))
+        "총액(계산)": o.total_price,                   # 자동계산 원본
+        "총액 수동입력": o.total_override or 0,        # ✅ 사용자가 직접 입력
+        "표시 총액(수동값 우선)": get_effective_total(o), # ✅ 읽기 전용
+        "메모": getattr(o, "memo", "") or "",           # ✅ 메모
+    "계산서 발행": bool(getattr(o, "invoice_issued", 0))
     } for o in orders])
 
     edited = st.data_editor(
@@ -342,40 +412,76 @@ def render_order_query_page():
         use_container_width=True,
         hide_index=True,
         column_order=[
-            "발주일", "제작처", "부수", "권당 가격",
-            "공급가(VAT 제외)", "부가세", "총액(VAT 포함)", "계산서 발행", "id"
+        "발주일","제작처","부수","권당 가격",
+        "공급가(VAT 제외)","부가세","총액(계산)",
+        "총액 수동입력","표시 총액(수동값 우선)","메모","계산서 발행","id"
         ],
         column_config={
-            "계산서 발행": st.column_config.CheckboxColumn("계산서 발행", help="발행 시 체크"),
-            "id": st.column_config.Column("id", help="내부키", disabled=True)
+        "총액 수동입력": st.column_config.NumberColumn("총액 수동입력", help="입력하면 표시 총액이 이 값으로 대체됩니다.", step=1000, min_value=0),
+        "표시 총액(수동값 우선)": st.column_config.NumberColumn("표시 총액(수동값 우선)", disabled=True, help="수동입력이 있으면 그 값, 없으면 자동계산 값"),
+        "메모": st.column_config.TextColumn("메모", width="large"),
+        "계산서 발행": st.column_config.CheckboxColumn("계산서 발행", help="발행 시 체크"),
+        "id": st.column_config.Column("id", disabled=True),
         },
         key="order_invoice_editor"
     )
 
     # 변경 저장 버튼 (체크박스 변경만 반영)
     if st.button("변경 저장", key="order_invoice_save"):
-        orig = df_orig.set_index("id")["계산서 발행"]
-        new = edited.set_index("id")["계산서 발행"]
-        changed_ids = [int(i) for i in new.index if bool(new.loc[i]) != bool(orig.loc[i])]
-        if not changed_ids:
-            st.info("변경된 항목이 없습니다.")
-        else:
-            for oid in changed_ids:
-                set_invoice_status(oid, bool(new.loc[oid]))
-            st.success(f"계산서 발행 상태가 {len(changed_ids)}건 저장되었습니다.")
-            st.rerun()
+    # 원본/수정본 인덱싱
+        orig = df_orig.set_index("id")
+        new = edited.set_index("id")
+
+    changed_count = 0
+
+    # 4-1) 계산서 발행 변경 사항 (기존 로직 그대로)
+    if "계산서 발행" in new.columns and "계산서 발행" in orig.columns:
+        for oid in new.index:
+            old_val = bool(orig.at[oid, "계산서 발행"])
+            new_val = bool(new.at[oid, "계산서 발행"])
+            if old_val != new_val:
+                # ⚠️ 기존에 쓰던 함수명이 있다면 그대로 호출 (예: set_invoice_status)
+                try:
+                    set_invoice_status(int(oid), new_val)
+                    changed_count += 1
+                except NameError:
+                    # 함수가 없다면 무시하거나, 필요 시 구현하세요.
+                    pass
+
+    # 4-2) 총액 수동입력 & 메모 변경 사항
+    for oid in new.index:
+        old_override = int(orig.at[oid, "총액 수동입력"]) if "총액 수동입력" in orig.columns else 0
+        new_override = int(new.at[oid, "총액 수동입력"]) if "총액 수동입력" in new.columns and str(new.at[oid, "총액 수동입력"]).isdigit() else 0
+
+        old_memo = str(orig.at[oid, "메모"]) if "메모" in orig.columns else ""
+        new_memo = str(new.at[oid, "메모"]) if "메모" in new.columns else ""
+
+        if (new_override != old_override) or (new_memo != old_memo):
+            set_order_override_and_memo(int(oid), new_override, new_memo)
+            changed_count += 1
+
+    if changed_count == 0:
+        st.info("변경된 항목이 없습니다.")
+    else:
+        st.success(f"{changed_count}건이 저장되었습니다.")
+        st.rerun()
 
     st.markdown("### 세부 항목")
 
     # 4) 각 주문 상세 + 발주 취소
     for o in orders:
-        header = f"📄 {o.date} · {o.qty}부 · 총액 {(o.total_price or 0):,}원"
+        eff_total = get_effective_total(o)
+        header = f"📄 {o.date} · {o.qty}부 · 표시 총액 {eff_total:,}원"
         with st.expander(header, expanded=False):
             st.markdown(
-                f"**권당 가격:** {(o.unit_price or 0):,}원 · "
                 f"**공급가:** {(o.supply_price or 0):,}원 · "
                 f"**부가세:** {(o.vat_price or 0):,}원 · "
-                f"**총액:** {(o.total_price or 0):,}원"
+                f"**총액(계산):** {(o.total_price or 0):,}원"
+            )
+        if (o.total_override or 0) > 0:
+            st.info(f"총액 수동입력 적용: {(o.total_override or 0):,}원 (표시 총액은 이 값으로 대체됩니다)")
+        if getattr(o, "memo", ""):
+            st.write(f"📝 메모: {o.memo}")
             )
             st.write(f"• 제작처: {o.vendor or '—'}")
             st.write(f"• 계산서 발행: {'✅ 발행됨' if getattr(o, 'invoice_issued', 0) else '❌ 미발행'}")
