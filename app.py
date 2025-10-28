@@ -55,13 +55,32 @@ st.set_page_config(
 # ---------------------------
 # DB 연결/모델
 # ---------------------------
-os.makedirs("data", exist_ok=True)
+from sqlalchemy import create_engine, text
+from urllib.parse import quote_plus
 import streamlit as st
-from sqlalchemy import create_engine
 
-engine = create_engine(st.secrets["DB_URL"], echo=False)
-Base = declarative_base()
-SessionLocal = sessionmaker(bind=engine)
+# Supabase 연결 함수
+def build_engine_from_secrets():
+    host = st.secrets["DB_HOST"].strip()
+    port = str(st.secrets.get("DB_PORT", "6543")).strip()  # Session pooler 포트
+    user = st.secrets.get("DB_USER", "postgres").strip()
+    pwd  = quote_plus(str(st.secrets["DB_PASS"]))  # 특수문자 안전하게 처리
+    name = st.secrets.get("DB_NAME", "postgres").strip()
+
+    # PostgreSQL 접속 URL (SSL 적용)
+    url  = f"postgresql+psycopg://{user}:{pwd}@{host}:{port}/{name}?sslmode=require"
+    return create_engine(url, echo=False, pool_pre_ping=True)
+
+engine = build_engine_from_secrets()
+
+# DB 연결 테스트 (처음 배포 시 에러 확인용)
+try:
+    with engine.connect() as conn:
+        conn.execute(text("select 1"))
+except Exception as e:
+    st.error("❌ DB 연결 실패: Secrets/호스트/포트/비번/sslmode를 확인하세요.")
+    st.exception(e)
+    st.stop()
 
 # 도서(사양)
 class Book(Base):
