@@ -5,7 +5,6 @@ from datetime import date
 import streamlit as st
 import pandas as pd
 
-# 🔒 비밀번호 입력 구간 (여기 넣기!)
 # 🔐 접근 제한 (세션 유지 + 시크릿 지원)
 APP_PASSWORD = st.secrets.get("APP_PASSWORD", "bookk2025")
 
@@ -14,9 +13,12 @@ if "authenticated" not in st.session_state:
 
 def login_form():
     st.title("🔒 접근 제한")
-    pw = st.text_input("비밀번호를 입력하세요", type="password")
-    if st.button("접속"):
-        if pw == APP_PASSWORD:
+    pw = st.text_input("비밀번호를 입력하세요", type="password", key="pw_input")
+    if st.button("접속", key="login_btn"):
+        # 공백/개행, None 방지
+        typed = (pw or "").strip()
+        expect = str(APP_PASSWORD).strip()
+        if typed == expect:
             st.session_state.authenticated = True
             st.success("✅ 인증되었습니다.")
             st.rerun()
@@ -27,6 +29,7 @@ def login_form():
 if not st.session_state.authenticated:
     login_form()
     st.stop()
+
 
 # (선택) 로그아웃 버튼
 with st.sidebar:
