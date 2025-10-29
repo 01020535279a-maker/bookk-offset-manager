@@ -808,3 +808,11 @@ elif page == "📦 발주 입력":
     render_order_input_page()
 else:
     render_book_spec_page()
+
+try:
+    with engine.connect() as conn:
+        conn.execute(text("select 1"))
+except Exception as e:
+    st.error("❌ DB 연결 실패: Secrets/호스트/포트/비번/sslmode를 다시 확인하세요.")
+    st.exception(e)
+    st.stop()
