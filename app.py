@@ -809,10 +809,10 @@ elif page == "📦 발주 입력":
 else:
     render_book_spec_page()
 
-try:
-    with engine.connect() as conn:
-        conn.execute(text("select 1"))
-except Exception as e:
-    st.error("❌ DB 연결 실패: Secrets/호스트/포트/비번/sslmode를 다시 확인하세요.")
-    st.exception(e)
-    st.stop()
+st.caption("🔎 연결 파라미터 점검")
+st.write({
+    "host": st.secrets.get("DB_HOST","")[:12] + "...pooler...",
+    "port": st.secrets.get("DB_PORT",""),
+    "user": st.secrets.get("DB_USER",""),
+    "db":   st.secrets.get("DB_NAME","")
+})
