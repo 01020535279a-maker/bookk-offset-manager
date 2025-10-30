@@ -44,32 +44,42 @@ if not st.session_state.authenticated:
     _login_form()
     st.stop()
 
-# =========================================================
+# ==========================
 # DB 연결
-#   - Supabase(Session pooler 6543) 권장
-#   - Secrets에 값이 없으면 SQLite 로컬로 폴백
-# =========================================================
+#  - Supabase(Session pooler 6543) 권장
+#  - Secrets에 값이 없으면 SQLite로 로컬 폴백
+# ==========================
+from urllib.parse import quote_plus  # ← 꼭 추가
+
 def build_engine_from_secrets_or_sqlite():
-    """Supabase 연결(권장). 실패/미설정 시 SQLite로 폴백."""
+    """Supabase 연결(정상), 실패/미설정 시 SQLite로 폴백."""
     try:
         host = st.secrets["DB_HOST"].strip()
-        port = str(st.secrets.get("DB_PORT", "6543")).strip()
+        port = st.secrets.get("DB_PORT", "6543").strip()
         user = st.secrets.get("DB_USER", "postgres").strip()
-        pwd  = quote_plus(str(st.secrets["DB_PASS"]))
+        pwd = quote_plus(st.secrets["DB_PASS"])  # ← 여기 인코딩 필수
         name = st.secrets.get("DB_NAME", "postgres").strip()
-        url  = f"postgresql+psycopg://{user}:{pwd}@{host}:{port}/{name}?sslmode=require"
-        eng  = create_engine(url, echo=False, pool_pre_ping=True)
+
+        url = (
+            f"postgresql+psycopg2://{user}:{pwd}@"
+            f"{host}:{port}/{name}?sslmode=require"
+        )
+
+        eng = create_engine(url, echo=False, pool_pre_ping=True)
+
         # 연결 테스트
         with eng.connect() as conn:
             conn.execute(text("select 1"))
-        st.caption("🟢 DB 연결: Supabase(Session pooler)")
+            st.caption("🟢 DB 연결: Supabase(Session pooler)")
         return eng
+
     except Exception as e:
         # 폴백: SQLite 로컬 파일
         os.makedirs("data", exist_ok=True)
         eng = create_engine("sqlite:///data/app.db", echo=False)
-        st.caption("🟡 DB 연결: 로컬 SQLite(폴백)")
+        st.warning("🟡 DB 연결 실패: 로컬 SQLite로 대체합니다.")
         return eng
+
 
 engine = build_engine_from_secrets_or_sqlite()
 
