@@ -54,6 +54,9 @@ from urllib.parse import quote_plus  # ← 꼭 추가
 def build_engine_from_secrets_or_sqlite():
     """Supabase 연결(정상), 실패/미설정 시 SQLite로 폴백."""
     try:
+        st.write("DEBUG/url:", url)
+        st.write("DEBUG/keys:", list(st.secrets.keys()))
+        
         host = st.secrets["DB_HOST"].strip()
         port = st.secrets.get("DB_PORT", "6543").strip()
         user = st.secrets.get("DB_USER", "postgres").strip()
@@ -85,7 +88,8 @@ engine = build_engine_from_secrets_or_sqlite()
 
 Base = declarative_base()
 SessionLocal = sessionmaker(bind=engine)
-
+st.caption(f"🔎 engine.url = {engine.url}")
+st.caption(f"🔎 dialect = {engine.dialect.name}")   # postgresql 이면 OK, sqlite면 폴백
 # =========================================================
 # 모델
 # =========================================================
