@@ -19,6 +19,12 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
+# --- 항상 보이는 디버그 (로그인보다 위) ---
+st.caption("🔧 app booted")
+keys = list(st.secrets.keys())
+st.caption("🔑 secrets keys = " + str(keys))
+st.caption("🔒 has DB_HOST? " + str("DB_HOST" in st.secrets))
+
 
 # =========================================================
 # 🔐 접근 제한 (비밀번호 게이트)
@@ -54,9 +60,9 @@ from urllib.parse import quote_plus  # ← 꼭 추가
 def build_engine_from_secrets_or_sqlite():
     """Supabase 연결(정상), 실패/미설정 시 SQLite로 폴백."""
     try:
-        st.write("DEBUG/url:", url)
+        st.write("🔧 build_engine_from_secrets_or_sqlite() 시작됨")
         st.write("DEBUG/keys:", list(st.secrets.keys()))
-        
+
         host = st.secrets["DB_HOST"].strip()
         port = st.secrets.get("DB_PORT", "6543").strip()
         user = st.secrets.get("DB_USER", "postgres").strip()
@@ -67,6 +73,7 @@ def build_engine_from_secrets_or_sqlite():
             f"postgresql+psycopg2://{user}:{pwd}@"
             f"{host}:{port}/{name}?sslmode=require"
         )
+        st.write("DEBUG/url:", url)  # 👈 여기에 한 줄 추가!
 
         eng = create_engine(url, echo=False, pool_pre_ping=True)
 
@@ -77,6 +84,8 @@ def build_engine_from_secrets_or_sqlite():
         return eng
 
     except Exception as e:
+        st.error(f"DB 연결 실패: {e}")
+
         # 폴백: SQLite 로컬 파일
         os.makedirs("data", exist_ok=True)
         eng = create_engine("sqlite:///data/app.db", echo=False)
