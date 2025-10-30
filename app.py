@@ -5,84 +5,80 @@ from datetime import date
 import streamlit as st
 import pandas as pd
 
-# 🔐 접근 제한 (세션 유지 + 시크릿 지원)
-APP_PASSWORD = st.secrets.get("APP_PASSWORD", "qnzmzm1101!")
-
-if "authenticated" not in st.session_state:
-    st.session_state.authenticated = False
-
-def login_form():
-    st.title("🔒 접근 제한")
-    pw = st.text_input("비밀번호를 입력하세요", type="password", key="pw_input")
-    if st.button("접속", key="login_btn"):
-        # 공백/개행, None 방지
-        typed = (pw or "").strip()
-        expect = str(APP_PASSWORD).strip()
-        if typed == expect:
-            st.session_state.authenticated = True
-            st.success("✅ 인증되었습니다.")
-            st.rerun()
-        else:
-            st.error("❌ 비밀번호가 올바르지 않습니다.")
-
-# 비로그인 상태면 아래 코드 실행 중단
-if not st.session_state.authenticated:
-    login_form()
-    st.stop()
-
-
-# (선택) 로그아웃 버튼
-with st.sidebar:
-    if st.button("로그아웃"):
-        st.session_state.authenticated = False
-        st.rerun()
-
-
-from sqlalchemy import create_engine, Column, Integer, String, Text
+from sqlalchemy import (
+    create_engine, Column, Integer, String, Text, text
+)
 from sqlalchemy.orm import declarative_base, sessionmaker
-from sqlalchemy import text
+from urllib.parse import quote_plus
 
-
-# ---------------------------
+# =========================================================
 # 페이지 설정
-# ---------------------------
+# =========================================================
 st.set_page_config(
     page_title="📚 옵셋 도서 제작 관리",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
-# ---------------------------
-# DB 연결/모델
-# ---------------------------
-from sqlalchemy import create_engine, text
-from urllib.parse import quote_plus
-import streamlit as st
+# =========================================================
+# 🔐 접근 제한 (비밀번호 게이트)
+#   - Secrets(APP_PASSWORD)가 있으면 사용, 없으면 기본값 사용
+# =========================================================
+APP_PASSWORD = st.secrets.get("APP_PASSWORD", "bookk2025")
 
-# Supabase 연결 함수
-def build_engine_from_secrets():
-    host = st.secrets["DB_HOST"].strip()
-    port = str(st.secrets.get("DB_PORT", "6543")).strip()  # Session pooler 포트
-    user = st.secrets.get("DB_USER", "postgres").strip()
-    pwd  = quote_plus(str(st.secrets["DB_PASS"]))  # 특수문자 안전하게 처리
-    name = st.secrets.get("DB_NAME", "postgres").strip()
+if "authenticated" not in st.session_state:
+    st.session_state.authenticated = False
 
-    # PostgreSQL 접속 URL (SSL 적용)
-    url  = f"postgresql+psycopg://{user}:{pwd}@{host}:{port}/{name}?sslmode=require"
-    return create_engine(url, echo=False, pool_pre_ping=True)
+def _login_form():
+    st.title("🔒 접근 제한")
+    pw = st.text_input("비밀번호를 입력하세요", type="password", key="pw_input")
+    if st.button("접속", key="login_btn"):
+        if (pw or "").strip() == str(APP_PASSWORD).strip():
+            st.session_state.authenticated = True
+            st.success("✅ 인증되었습니다.")
+            st.rerun()
+        else:
+            st.error("❌ 비밀번호가 올바르지 않습니다.")
 
-engine = build_engine_from_secrets()
-
-# DB 연결 테스트 (처음 배포 시 에러 확인용)
-try:
-    with engine.connect() as conn:
-        conn.execute(text("select 1"))
-except Exception as e:
-    st.error("❌ DB 연결 실패: Secrets/호스트/포트/비번/sslmode를 확인하세요.")
-    st.exception(e)
+if not st.session_state.authenticated:
+    _login_form()
     st.stop()
 
-# 도서(사양)
+# =========================================================
+# DB 연결
+#   - Supabase(Session pooler 6543) 권장
+#   - Secrets에 값이 없으면 SQLite 로컬로 폴백
+# =========================================================
+def build_engine_from_secrets_or_sqlite():
+    """Supabase 연결(권장). 실패/미설정 시 SQLite로 폴백."""
+    try:
+        host = st.secrets["DB_HOST"].strip()
+        port = str(st.secrets.get("DB_PORT", "6543")).strip()
+        user = st.secrets.get("DB_USER", "postgres").strip()
+        pwd  = quote_plus(str(st.secrets["DB_PASS"]))
+        name = st.secrets.get("DB_NAME", "postgres").strip()
+        url  = f"postgresql+psycopg://{user}:{pwd}@{host}:{port}/{name}?sslmode=require"
+        eng  = create_engine(url, echo=False, pool_pre_ping=True)
+        # 연결 테스트
+        with eng.connect() as conn:
+            conn.execute(text("select 1"))
+        st.caption("🟢 DB 연결: Supabase(Session pooler)")
+        return eng
+    except Exception as e:
+        # 폴백: SQLite 로컬 파일
+        os.makedirs("data", exist_ok=True)
+        eng = create_engine("sqlite:///data/app.db", echo=False)
+        st.caption("🟡 DB 연결: 로컬 SQLite(폴백)")
+        return eng
+
+engine = build_engine_from_secrets_or_sqlite()
+
+Base = declarative_base()
+SessionLocal = sessionmaker(bind=engine)
+
+# =========================================================
+# 모델
+# =========================================================
 class Book(Base):
     __tablename__ = "books"
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -97,7 +93,6 @@ class Book(Base):
     binding = Column(String)                  # 제본 방식
     postprocess = Column(String)              # 후가공
 
-# 발주(주문)
 class Order(Base):
     __tablename__ = "orders"
 
@@ -106,15 +101,14 @@ class Order(Base):
     qty = Column(Integer, nullable=False)
     date = Column(String, nullable=False)  # YYYY-MM-DD
     vendor = Column(String)                # 제작처
-    unit_price = Column(Integer)           # 권당 가격(부가세 제외)
-    invoice_issued = Column(Integer)       # 0/1
-    total_override = Column(Integer)  # ✅ 총액 수동 입력(없으면 NULL/0)
-    memo = Column(Text)               # ✅ 메모
 
-    # 합계(공급가/부가세/총액)
+    # 합계
     supply_price = Column(Integer)  # VAT 제외
     vat_price = Column(Integer)     # 10%
     total_price = Column(Integer)   # VAT 포함
+
+    # 권당 가격(선택) - 단순 계산용
+    unit_price = Column(Integer)
 
     # 표지
     cover_ctp_unit = Column(Integer); cover_ctp_cost = Column(Integer)
@@ -147,54 +141,73 @@ class Order(Base):
     misc_unit = Column(Integer); misc_cost = Column(Integer)
     delivery_unit = Column(Integer); delivery_cost = Column(Integer)
 
+    # 편의 필드
+    invoice_issued = Column(Integer, default=0)  # 0/1
+    total_override = Column(Integer)             # 총액 수동입력(우선표시)
+    memo = Column(Text)                          # 메모
+
 Base.metadata.create_all(bind=engine)
 
-# ✅ 여기에 아래 코드 한 번에 붙여넣기
-from sqlalchemy import text
-
-def _ensure_orders_override_and_memo():
+# =========================================================
+# Postgres/SQLite 겸용 컬럼 보장(마이그레이션)
+#   - Postgres는 information_schema, SQLite는 PRAGMA 사용
+# =========================================================
+def _table_columns_pg(table_name: str) -> set[str]:
+    q = text("""
+        SELECT column_name
+        FROM information_schema.columns
+        WHERE table_name = :t
+    """)
     with engine.connect() as conn:
-        cols = [r[1] for r in conn.execute(text("PRAGMA table_info(orders)")).fetchall()]
-        if "total_override" not in cols:
-            conn.execute(text("ALTER TABLE orders ADD COLUMN total_override INTEGER"))
-        if "memo" not in cols:
-            conn.execute(text("ALTER TABLE orders ADD COLUMN memo TEXT"))
-        conn.commit()
+        rows = conn.execute(q, {"t": table_name}).fetchall()
+        return {r[0] for r in rows}
 
-_ensure_orders_override_and_memo()
-
-# --- one-off migrations: 컬럼 없으면 추가 ---
-def _pragma_cols(conn):
-    return [r[1] for r in conn.execute(text("PRAGMA table_info(orders)")).fetchall()]
-
-def _ensure_orders_vendor_column():
+def _table_columns_sqlite(table_name: str) -> set[str]:
     with engine.connect() as conn:
-        cols = _pragma_cols(conn)
-        if "vendor" not in cols:
-            conn.execute(text("ALTER TABLE orders ADD COLUMN vendor TEXT"))
-            conn.commit()
+        rows = conn.execute(text(f"PRAGMA table_info({table_name})")).fetchall()
+        # row: (cid, name, type, notnull, dflt_value, pk)
+        return {r[1] for r in rows}
 
-def _ensure_orders_unit_price_column():
-    with engine.connect() as conn:
-        cols = _pragma_cols(conn)
-        if "unit_price" not in cols:
-            conn.execute(text("ALTER TABLE orders ADD COLUMN unit_price INTEGER"))
-            conn.commit()
+def ensure_orders_columns():
+    # 엔진 종류 판별
+    dialect = engine.dialect.name.lower()
+    if dialect == "postgresql":
+        cols = _table_columns_pg("orders")
+    else:
+        cols = _table_columns_sqlite("orders")
 
-def _ensure_orders_invoice_column():
-    with engine.connect() as conn:
-        cols = _pragma_cols(conn)
-        if "invoice_issued" not in cols:
-            conn.execute(text("ALTER TABLE orders ADD COLUMN invoice_issued INTEGER DEFAULT 0"))
-            conn.commit()
+    stmts = []
+    def add(stmt: str):
+        stmts.append(stmt)
 
-_ensure_orders_vendor_column()
-_ensure_orders_unit_price_column()
-_ensure_orders_invoice_column()
+    # 누락 시 추가
+    if "vendor" not in cols:
+        add("ALTER TABLE orders ADD COLUMN vendor TEXT")
+    if "unit_price" not in cols:
+        add("ALTER TABLE orders ADD COLUMN unit_price INTEGER")
+    if "invoice_issued" not in cols:
+        add("ALTER TABLE orders ADD COLUMN invoice_issued INTEGER DEFAULT 0")
+    if "total_override" not in cols:
+        add("ALTER TABLE orders ADD COLUMN total_override INTEGER")
+    if "memo" not in cols:
+        add("ALTER TABLE orders ADD COLUMN memo TEXT")
 
-# ---------------------------
+    if not stmts:
+        return
+
+    with engine.begin() as conn:
+        for s in stmts:
+            try:
+                conn.execute(text(s))
+            except Exception:
+                # 이미 있는 경우 등 에러 무시(엔진별 차이)
+                pass
+
+ensure_orders_columns()
+
+# =========================================================
 # 공용 함수
-# ---------------------------
+# =========================================================
 def get_session():
     return SessionLocal()
 
@@ -218,32 +231,14 @@ def calc_supply_and_vat(data_dict: dict):
     vat = int(round(supply * 0.10))
     total = supply + vat
     return supply, vat, total
-def get_effective_total(order: Order) -> int:
-    """표시용 총액: 수동입력 값이 있으면 그 값을 우선."""
-    ov = getattr(order, "total_override", 0) or 0
-    return int(ov) if ov > 0 else int(order.total_price or 0)
 
-def set_order_override_and_memo(order_id: int, override_value: int | None, memo_text: str | None):
-    s = get_session()
-    try:
-        o = s.query(Order).filter(Order.id == order_id).first()
-        if o:
-            # 0 또는 빈 값이면 수동입력 해제
-            o.total_override = int(override_value) if (override_value not in [None, "", 0]) else None
-            o.memo = (memo_text or "").strip()
-            s.commit()
-    finally:
-        s.close()
-
-
-# ---------------------------
+# =========================================================
 # Book CRUD
-# ---------------------------
+# =========================================================
 def add_book(book: dict):
     s = get_session()
     try:
-        b = Book(**book)
-        s.add(b)
+        s.add(Book(**book))
         s.commit()
     finally:
         s.close()
@@ -276,54 +271,57 @@ def delete_book(book_id: int):
     finally:
         s.close()
 
-# ---------------------------
+# =========================================================
 # Order CRUD
-# ---------------------------
+# =========================================================
 def add_order(order_data: dict):
-    """권당 가격(unit_price)이 주어지면 그것을 우선으로 계산.
-       없으면 상세 비용 합산(calc_supply_and_vat) 사용."""
     s = get_session()
     try:
-        qty = _to_int(order_data["qty"])
-        unit_price = _to_int(order_data.get("unit_price", 0))
+        # 비용 합계 기반 계산
+        supply, vat, total = calc_supply_and_vat(order_data)
 
-        if unit_price > 0:
+        # 권당 가격이 있으면 qty*unit_price를 공급가로 사용(단순)
+        qty = _to_int(order_data.get("qty", 0))
+        unit_price = _to_int(order_data.get("unit_price", 0))
+        if unit_price and qty:
             supply = qty * unit_price
             vat = int(round(supply * 0.10))
             total = supply + vat
-        else:
-            supply, vat, total = calc_supply_and_vat(order_data)
 
         o = Order(
             book_id=order_data["book_id"],
             qty=qty,
             date=order_data["date"],
             vendor=order_data.get("vendor", ""),
-            unit_price=unit_price,
-            invoice_issued=_to_int(order_data.get("invoice_issued", 0)),
             supply_price=supply, vat_price=vat, total_price=total,
+            unit_price=unit_price,
+
             cover_ctp_unit=_to_int(order_data.get("cover_ctp_unit", 0)),
             cover_ctp_cost=_to_int(order_data.get("cover_ctp_cost", 0)),
             cover_print_unit=_to_int(order_data.get("cover_print_unit", 0)),
             cover_print_cost=_to_int(order_data.get("cover_print_cost", 0)),
             cover_paper_unit=_to_int(order_data.get("cover_paper_unit", 0)),
             cover_paper_cost=_to_int(order_data.get("cover_paper_cost", 0)),
+
             inner1_ctp_unit=_to_int(order_data.get("inner1_ctp_unit", 0)),
             inner1_ctp_cost=_to_int(order_data.get("inner1_ctp_cost", 0)),
             inner1_print_unit=_to_int(order_data.get("inner1_print_unit", 0)),
             inner1_print_cost=_to_int(order_data.get("inner1_print_cost", 0)),
             inner1_paper_unit=_to_int(order_data.get("inner1_paper_unit", 0)),
             inner1_paper_cost=_to_int(order_data.get("inner1_paper_cost", 0)),
+
             inner2_ctp_unit=_to_int(order_data.get("inner2_ctp_unit", 0)),
             inner2_ctp_cost=_to_int(order_data.get("inner2_ctp_cost", 0)),
             inner2_print_unit=_to_int(order_data.get("inner2_print_unit", 0)),
             inner2_print_cost=_to_int(order_data.get("inner2_print_cost", 0)),
             inner2_paper_unit=_to_int(order_data.get("inner2_paper_unit", 0)),
             inner2_paper_cost=_to_int(order_data.get("inner2_paper_cost", 0)),
+
             endpaper_unit=_to_int(order_data.get("endpaper_unit", 0)),
             endpaper_cost=_to_int(order_data.get("endpaper_cost", 0)),
             binding_unit=_to_int(order_data.get("binding_unit", 0)),
             binding_cost=_to_int(order_data.get("binding_cost", 0)),
+
             laminating_unit=_to_int(order_data.get("laminating_unit", 0)),
             laminating_cost=_to_int(order_data.get("laminating_cost", 0)),
             epoxy_unit=_to_int(order_data.get("epoxy_unit", 0)),
@@ -339,16 +337,6 @@ def add_order(order_data: dict):
         )
         s.add(o)
         s.commit()
-    finally:
-        s.close()
-
-def set_invoice_status(order_id: int, issued: bool):
-    s = get_session()
-    try:
-        o = s.query(Order).filter(Order.id == order_id).first()
-        if o:
-            o.invoice_issued = 1 if issued else 0
-            s.commit()
     finally:
         s.close()
 
@@ -372,17 +360,39 @@ def delete_order(order_id: int):
     finally:
         s.close()
 
+def set_invoice_status(order_id: int, is_issued: bool):
+    s = get_session()
+    try:
+        o = s.query(Order).filter(Order.id == order_id).first()
+        if o:
+            o.invoice_issued = 1 if is_issued else 0
+            s.commit()
+    finally:
+        s.close()
+
+def set_order_override_and_memo(order_id: int, total_override: int, memo: str):
+    s = get_session()
+    try:
+        o = s.query(Order).filter(Order.id == order_id).first()
+        if o:
+            o.total_override = _to_int(total_override)
+            o.memo = (memo or "").strip()
+            s.commit()
+    finally:
+        s.close()
+
 # =========================================================
 # 페이지 1) 🔍 발주 조회
+#   - 총액 수동입력, 메모 열 편집 + 저장
 # =========================================================
 def render_order_query_page():
     st.header("🔍 발주 조회")
 
-    # 0) 상태 초기화
+    # 상태 초기화
     if "confirm_delete_order" not in st.session_state:
         st.session_state["confirm_delete_order"] = None
 
-    # 1) 도서명 검색 + 도서 선택
+    # 도서 검색/선택
     search_title = st.text_input("도서명 검색", key="query_search_title")
     books = get_books()
     filtered_books = [b for b in books if (search_title or "").strip() in (b.title or "")]
@@ -402,7 +412,7 @@ def render_order_query_page():
     if not selected_book:
         return
 
-    # 2) 부수(정확히 일치) 필터
+    # 부수 필터
     qty_filter_text = st.text_input("부수 검색 (숫자만 입력)", key="query_qty_filter")
     orders = get_orders(
         selected_book.id,
@@ -413,20 +423,19 @@ def render_order_query_page():
         st.info("발주 내역이 없습니다.")
         return
 
-    # 3) 요약 표 (편집 가능, '계산서 발행' 체크박스)
+    # 요약 표 (편집 가능)
     df_orig = pd.DataFrame([{
         "id": o.id,
         "발주일": o.date,
         "제작처": o.vendor or "",
         "부수": o.qty,
-        "권당 가격": getattr(o, "unit_price", None) or "",  # 있으면 표시, 없으면 공란
-        "공급가(VAT 제외)": o.supply_price,
-        "부가세": o.vat_price,
-        "총액(계산)": o.total_price,                   # 자동계산 원본
-        "총액 수동입력": o.total_override or 0,        # ✅ 사용자가 직접 입력
-        "표시 총액(수동값 우선)": get_effective_total(o), # ✅ 읽기 전용
-        "메모": getattr(o, "memo", "") or "",           # ✅ 메모
-    "계산서 발행": bool(getattr(o, "invoice_issued", 0))
+        "권당 가격": o.unit_price or 0,
+        "공급가(VAT 제외)": o.supply_price or 0,
+        "부가세": o.vat_price or 0,
+        "총액(VAT 포함)": (o.total_override if (o.total_override not in (None, 0)) else (o.total_price or 0)),
+        "총액 수동입력": o.total_override or 0,
+        "메모": o.memo or "",
+        "계산서 발행": bool(getattr(o, "invoice_issued", 0)),
     } for o in orders])
 
     edited = st.data_editor(
@@ -434,79 +443,76 @@ def render_order_query_page():
         use_container_width=True,
         hide_index=True,
         column_order=[
-        "발주일","제작처","부수","권당 가격",
-        "공급가(VAT 제외)","부가세","총액(계산)",
-        "총액 수동입력","표시 총액(수동값 우선)","메모","계산서 발행","id"
+            "발주일", "제작처", "부수", "권당 가격",
+            "공급가(VAT 제외)", "부가세", "총액(VAT 포함)",
+            "총액 수동입력", "메모", "계산서 발행", "id"
         ],
         column_config={
-        "총액 수동입력": st.column_config.NumberColumn("총액 수동입력", help="입력하면 표시 총액이 이 값으로 대체됩니다.", step=1000, min_value=0),
-        "표시 총액(수동값 우선)": st.column_config.NumberColumn("표시 총액(수동값 우선)", disabled=True, help="수동입력이 있으면 그 값, 없으면 자동계산 값"),
-        "메모": st.column_config.TextColumn("메모", width="large"),
-        "계산서 발행": st.column_config.CheckboxColumn("계산서 발행", help="발행 시 체크"),
-        "id": st.column_config.Column("id", disabled=True),
+            "계산서 발행": st.column_config.CheckboxColumn("계산서 발행", help="발행 시 체크"),
+            "총액 수동입력": st.column_config.NumberColumn("총액 수동입력(직접 입력 시 표시 우선)"),
+            "메모": st.column_config.TextColumn("메모", help="자유 메모"),
+            "id": st.column_config.Column("id", help="내부키", disabled=True),
         },
         key="order_invoice_editor"
     )
 
-    # 변경 저장 버튼 (체크박스 변경만 반영)
+    # 변경 저장 (체크박스/수동총액/메모)
     if st.button("변경 저장", key="order_invoice_save"):
-    # 원본/수정본 인덱싱
         orig = df_orig.set_index("id")
         new = edited.set_index("id")
 
-    changed_count = 0
+        changed_count = 0
 
-    # 4-1) 계산서 발행 변경 사항 (기존 로직 그대로)
-    if "계산서 발행" in new.columns and "계산서 발행" in orig.columns:
-        for oid in new.index:
-            old_val = bool(orig.at[oid, "계산서 발행"])
-            new_val = bool(new.at[oid, "계산서 발행"])
-            if old_val != new_val:
-                # ⚠️ 기존에 쓰던 함수명이 있다면 그대로 호출 (예: set_invoice_status)
-                try:
+        # 계산서 발행 변경
+        if "계산서 발행" in new.columns and "계산서 발행" in orig.columns:
+            for oid in new.index:
+                old_val = bool(orig.at[oid, "계산서 발행"])
+                new_val = bool(new.at[oid, "계산서 발행"])
+                if old_val != new_val:
                     set_invoice_status(int(oid), new_val)
                     changed_count += 1
-                except NameError:
-                    # 함수가 없다면 무시하거나, 필요 시 구현하세요.
-                    pass
 
-    # 4-2) 총액 수동입력 & 메모 변경 사항
-    for oid in new.index:
-        old_override = int(orig.at[oid, "총액 수동입력"]) if "총액 수동입력" in orig.columns else 0
-        new_override = int(new.at[oid, "총액 수동입력"]) if "총액 수동입력" in new.columns and str(new.at[oid, "총액 수동입력"]).isdigit() else 0
+        # 총액 수동입력/메모 변경
+        def _safe_int(v):
+            try: return int(v)
+            except: return 0
 
-        old_memo = str(orig.at[oid, "메모"]) if "메모" in orig.columns else ""
-        new_memo = str(new.at[oid, "메모"]) if "메모" in new.columns else ""
+        for oid in new.index:
+            old_override = _safe_int(orig.at[oid, "총액 수동입력"]) if "총액 수동입력" in orig.columns else 0
+            new_override = _safe_int(new.at[oid, "총액 수동입력"]) if "총액 수동입력" in new.columns else 0
 
-        if (new_override != old_override) or (new_memo != old_memo):
-            set_order_override_and_memo(int(oid), new_override, new_memo)
-            changed_count += 1
+            old_memo = str(orig.at[oid, "메모"]) if "메모" in orig.columns else ""
+            new_memo = str(new.at[oid, "메모"]) if "메모" in new.columns else ""
 
-    if changed_count == 0:
-        st.info("변경된 항목이 없습니다.")
-    else:
-        st.success(f"{changed_count}건이 저장되었습니다.")
-        st.rerun()
+            if (new_override != old_override) or (new_memo != old_memo):
+                set_order_override_and_memo(int(oid), new_override, new_memo)
+                changed_count += 1
+
+        if changed_count == 0:
+            st.info("변경된 항목이 없습니다.")
+        else:
+            st.success(f"{changed_count}건이 저장되었습니다.")
+            st.rerun()
 
     st.markdown("### 세부 항목")
 
-    # 4) 각 주문 상세 + 발주 취소
     for o in orders:
-        eff_total = get_effective_total(o)
-        header = f"📄 {o.date} · {o.qty}부 · 표시 총액 {eff_total:,}원"
+        # 표기용 총액: 수동입력이 있으면 우선
+        shown_total = o.total_override if (o.total_override not in (None, 0)) else (o.total_price or 0)
+        header = f"📄 {o.date} · {o.qty}부 · 총액 {shown_total:,}원"
         with st.expander(header, expanded=False):
             st.markdown(
                 f"**공급가:** {(o.supply_price or 0):,}원 · "
                 f"**부가세:** {(o.vat_price or 0):,}원 · "
-                f"**총액(계산):** {(o.total_price or 0):,}원"
+                f"**총액(표시):** {shown_total:,}원"
             )
-        if (o.total_override or 0) > 0:
-            st.info(f"총액 수동입력 적용: {(o.total_override or 0):,}원 (표시 총액은 이 값으로 대체됩니다)")
-        if getattr(o, "memo", ""):
-            st.write(f"📝 메모: {o.memo}")
             st.write(f"• 제작처: {o.vendor or '—'}")
+            st.write(f"• 권당 가격: {(o.unit_price or 0):,}원")
             st.write(f"• 계산서 발행: {'✅ 발행됨' if getattr(o, 'invoice_issued', 0) else '❌ 미발행'}")
+            if o.memo:
+                st.write(f"• 메모: {o.memo}")
 
+            # 보조 출력 함수
             def show_line(label, unit, cost):
                 u = unit or 0
                 c = cost or 0
@@ -539,6 +545,7 @@ def render_order_query_page():
             show_line("제판대", o.plate_unit, o.plate_cost)
             show_line("필름", o.film_unit, o.film_cost)
 
+            # 발주 취소
             cols = st.columns(2)
             with cols[0]:
                 if st.button("✖️ 발주 취소", key=f"cancel_order_btn_{o.id}"):
@@ -561,6 +568,9 @@ def render_order_query_page():
 
 # =========================================================
 # 페이지 2) 📦 발주 입력
+#   - 1) 발주일 2) 제작부수 3) 권당 가격
+#   - 4) 총 합계(= 부수 x 권당가격) 5) VAT(10%) 포함 총액
+#   - 6) 제작처
 # =========================================================
 def render_order_input_page():
     st.header("📦 발주 입력")
@@ -577,29 +587,20 @@ def render_order_input_page():
     )
 
     with st.form("order_form_detail"):
-        # --- 상단 구조: 1) 발주일 2) 제작 부수 3) 권당 가격 ---
-        r1c1, r1c2, r1c3 = st.columns([1,1,1])
-        with r1c1:
-            order_date = st.date_input("발주일", value=date.today(), key="order_date")
-        with r1c2:
-            qty = st.number_input("제작 부수", min_value=1, step=100, value=1000, key="order_qty")
-        with r1c3:
-            unit_price = st.number_input("권당 가격", min_value=0, step=100, value=0, key="unit_price")
+        c1, c2, c3 = st.columns([1,1,1])
+        with c1:
+            qty = st.number_input("제작 부수", min_value=1, step=100, value=1000)
+        with c2:
+            order_date = st.date_input("발주일", value=date.today())
+        with c3:
+            vendor = st.text_input("제작처", "")
+        u1, u2 = st.columns([1,1])
+        with u1:
+            unit_price = st.number_input("권당 가격", min_value=0, step=100, value=0)
+        with u2:
+            st.caption("권당 가격 입력 시 비용 항목 대신 단순계산(부수×권당가격)을 사용합니다.")
 
-        # --- 4) 총 합계(부가세 제외) 5) VAT 합산 가격(부가세 포함) 6) 제작처 ---
-        subtotal = int(qty) * int(unit_price)
-        total_with_vat = subtotal + int(round(subtotal * 0.10))
-
-        r2c1, r2c2, r2c3 = st.columns([1,1,1])
-        with r2c1:
-            st.number_input("총 합계 (VAT 제외)", value=subtotal, step=0, format="%d", disabled=True, key="subtotal_preview")
-        with r2c2:
-            st.number_input("VAT 합산 가격 (VAT 포함)", value=total_with_vat, step=0, format="%d", disabled=True, key="vat_included_preview")
-        with r2c3:
-            vendor = st.text_input("제작처", "", key="vendor_name")
-            st.caption("권당 가격을 입력하면 합계가 자동 계산됩니다.")
-
-        # --- 상세 비용 섹션(선택 입력) ---
+        # --- 비용 항목 ---
         with st.expander("표지 (CTP/인쇄/종이)", expanded=False):
             cc1, cc2, cc3, cc4, cc5, cc6 = st.columns(6)
             with cc1: cover_ctp_unit = st.number_input("CTP 단가", min_value=0, step=1, value=0)
@@ -638,11 +639,11 @@ def render_order_input_page():
             with b2: binding_cost = st.number_input("제본 비용", min_value=0, step=1000, value=0)
 
         with st.expander("후가공 (라미/에폭시/제판/필름)", expanded=False):
-            l1,l2,e1,e2,p1,p2,f1,f2 = st.columns(8)
+            l1,l2,e3,e4,p1,p2,f1,f2 = st.columns(8)
             with l1: laminating_unit = st.number_input("라미 단가", min_value=0, step=1, value=0)
             with l2: laminating_cost = st.number_input("라미 비용", min_value=0, step=1000, value=0)
-            with e1: epoxy_unit = st.number_input("에폭시 단가", min_value=0, step=1, value=0)
-            with e2: epoxy_cost = st.number_input("에폭시 비용", min_value=0, step=1000, value=0)
+            with e3: epoxy_unit = st.number_input("에폭시 단가", min_value=0, step=1, value=0)
+            with e4: epoxy_cost = st.number_input("에폭시 비용", min_value=0, step=1000, value=0)
             with p1: plate_unit = st.number_input("제판대 단가", min_value=0, step=1, value=0)
             with p2: plate_cost = st.number_input("제판대 비용", min_value=0, step=1000, value=0)
             with f1: film_unit = st.number_input("필름 단가", min_value=0, step=1, value=0)
@@ -655,11 +656,34 @@ def render_order_input_page():
             with d1: delivery_unit = st.number_input("배송비 단가", min_value=0, step=1, value=0)
             with d2: delivery_cost = st.number_input("배송비 비용", min_value=0, step=1000, value=0)
 
-        # 저장
+        # 합계 미리보기
+        preview = {
+            "cover_ctp_cost":cover_ctp_cost, "cover_print_cost":cover_print_cost, "cover_paper_cost":cover_paper_cost,
+            "inner1_ctp_cost":inner1_ctp_cost, "inner1_print_cost":inner1_print_cost, "inner1_paper_cost":inner1_paper_cost,
+            "inner2_ctp_cost":inner2_ctp_cost, "inner2_print_cost":inner2_print_cost, "inner2_paper_cost":inner2_paper_cost,
+            "endpaper_cost":endpaper_cost, "binding_cost":binding_cost,
+            "laminating_cost":laminating_cost, "epoxy_cost":epoxy_cost, "plate_cost":plate_cost, "film_cost":film_cost,
+            "misc_cost":misc_cost, "delivery_cost":delivery_cost
+        }
+
+        # 권당가격이 있으면 단순 계산, 없으면 상세 비용 합산
+        if unit_price and qty:
+            sup = qty * unit_price
+            vat = int(round(sup * 0.10))
+            tot = sup + vat
+        else:
+            sup, vat, tot = calc_supply_and_vat(preview)
+
+        st.markdown(
+            f"**공급가(VAT 제외):** {sup:,}원 &nbsp;&nbsp; "
+            f"**부가세(10%):** {vat:,}원 &nbsp;&nbsp; "
+            f"**총액(VAT 포함):** {tot:,}원"
+        )
+
         if st.form_submit_button("📝 발주 저장"):
             payload = {
-                "book_id": book_choice.id, "qty": qty, "date": str(order_date),
-                "vendor": vendor, "unit_price": unit_price,
+                "book_id": book_choice.id, "qty": qty, "date": str(order_date), "vendor": vendor,
+                "unit_price": unit_price,
                 "cover_ctp_unit":cover_ctp_unit, "cover_ctp_cost":cover_ctp_cost,
                 "cover_print_unit":cover_print_unit, "cover_print_cost":cover_print_cost,
                 "cover_paper_unit":cover_paper_unit, "cover_paper_cost":cover_paper_cost,
@@ -789,18 +813,18 @@ def render_book_spec_page():
                             st.rerun()
 
 # =========================================================
-# 사이드бар 네비게이션 / 라우팅
+# 사이드바 네비게이션 / 라우팅
 # =========================================================
 with st.sidebar:
     st.markdown("## 메뉴")
     page = st.radio(
         "페이지 선택",
         ["🔍 발주 조회", "📦 발주 입력", "📘 도서 사양 등록"],
-        index=1,  # 새 구조 확인 편의상 기본을 발주 입력으로
+        index=0,
         key="sidebar_nav",
     )
     st.markdown("---")
-    st.caption("옵셋 도서 제작 관리 · v2 (unit price)")
+    st.caption("옵셋 도서 제작 관리 · v2 (Supabase/SQLite)")
 
 if page == "🔍 발주 조회":
     render_order_query_page()
@@ -808,11 +832,3 @@ elif page == "📦 발주 입력":
     render_order_input_page()
 else:
     render_book_spec_page()
-
-st.caption("🔎 연결 파라미터 점검")
-st.write({
-    "host": st.secrets.get("DB_HOST","")[:12] + "...pooler...",
-    "port": st.secrets.get("DB_PORT",""),
-    "user": st.secrets.get("DB_USER",""),
-    "db":   st.secrets.get("DB_NAME","")
-})
