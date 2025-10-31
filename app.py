@@ -68,10 +68,12 @@ def build_engine_from_secrets_or_sqlite():
         user = st.secrets.get("DB_USER", "postgres").strip()
         pwd = quote_plus(st.secrets["DB_PASS"])  # ← 여기 인코딩 필수
         name = st.secrets.get("DB_NAME", "postgres").strip()
+        project = st.secrets.get("DB_PROJECT", "").strip()
 
         url = (
             f"postgresql+psycopg2://{user}:{pwd}@"
             f"{host}:{port}/{name}?sslmode=require"
+            + (f"&options=project%3D{project}" if project else "")
         )
         st.write("DEBUG/url:", url)  # 👈 여기에 한 줄 추가!
 
